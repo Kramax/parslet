@@ -27,6 +27,8 @@ module Parslet::Atoms
       # Extracts the s-expression tag
       tag, *tail = value
 
+      puts "flatten: tag is #{tag.inspect}"
+      puts "flatten: value is #{value.inspect}"
       # Merges arrays:
       result = tail.
         map { |e| flatten(e) }            # first flatten each element
@@ -52,21 +54,86 @@ module Parslet::Atoms
     end
 
     # Flatten results from a sequence of parslets. 
+    # A sequence is generally something like "a >> b >> c"
+    # The simplest case would be something like "X" >> "Y" >> "Z" which we want simplified to "XYZ"
+    # A more complex case would be "x.as(:X) >> y.as(:Y)" which we want simplified to
+    # the hash { :X = x, :Y = y}
+    # The original parslet cannot handle this though: "x.as(:X) >> y.as(:X)" because it would
+    # overwrite x with y when merged so you would lose the first expression. 
+    # We want to improve this so that it would convert it to a repetition so it would result in
+    # { :X =>[ x, y] }
     #
     # @api private
     #
     def flatten_sequence(list)
+      puts "flatten_sequence: #{list.inspect}"
       foldl(list.compact) { |r, e|        # and then merge flat elements
+        puts "flatten_sequence: maybe merge <#{r.inspect}>, <#{e.inspect}>"
         merge_fold(r, e)
       }
     end
+
+    class ImplictRepetition
+      attr_reader :contents
+      attr_reader :key
+
+      def initialize(key, l, r)
+        if l.is_a?(ImplictRepetition)
+          if l.key != key
+            raise ParseFailed.new("Trying to merge hashes with different keys")
+          end
+          @contents = l.contents
+          @contents << r
+        else
+          @contents = [l,r]
+        end
+        @key = key
+      end
+    end
+
     # @api private 
     def merge_fold(l, r)
       # equal pairs: merge. ----------------------------------------------------
+      if l.is_a?(ImplictRepetition)
+        if r.is_a?(Hash)
+          if r.size != 1
+            raise ParseFailed.new("Trying to merge hashes with unmergeable keys")
+          end
+          return ImplictRepetition.new(r.keys.first, l, r)
+        end
+      end
+
       if l.class == r.class
         if l.is_a?(Hash)
-          warn_about_duplicate_keys(l, r)
-          return l.merge(r)
+          can_merge = true
+          akey = nil
+          result = l.merge(r) { |key,l_val,r_val| 
+            if l_val == r_val
+              l_val
+            else
+              akey = key
+              can_merge = false
+              nil
+            end
+          }
+
+          if can_merge
+            return result
+          end
+
+          if l.size == 1 && r.size == 1
+            #result = ImplictRepetition.new(akey, l, r)
+            result = { }
+            result[akey] = [ l[akey], r[akey]]
+            puts "merge_fold: merged to <#{result}>"
+            return result
+          end
+
+          # the .as(sym) needs to be refined for the parse node
+          raise ParseFailed.new("Duplicate unmergeable named hashes <#{l.inspect}> and <#{r.inspect}>")
+          
+          #warn_about_duplicate_keys(l, r)
+          #return l.merge(r)
         else
           return l + r
         end
@@ -102,6 +169,7 @@ module Parslet::Atoms
     # @api private
     #
     def flatten_repetition(list, named)
+      puts "flatten_repetition: #{named} <#{list.inspect}>"
       if list.any? { |e| e.instance_of?(Hash) }
         # If keyed subtrees are in the array, we'll want to discard all 
         # strings inbetween. To keep them, name them. 
@@ -131,7 +199,15 @@ module Parslet::Atoms
       unless d.empty?
         warn "Duplicate subtrees while merging result of \n  #{self.inspect}\nonly the values"+
              " of the latter will be kept. (keys: #{d.inspect})"
+             warn "h1 is #{h1.inspect}"
+             warn "h2 is #{h2.inspect}"
       end
+    end
+
+    # can two hashes be merged: only if they have orthogonal keys
+    def can_merge?(h1, h2)
+      d = h1.keys & h2.keys
+      return d.empty?
     end
   end
 end
